@@ -33,7 +33,7 @@ class NRMSModel_Capstone(BaseModel):
         )
 
     def _get_input_label_from_iter(self, batch_data):
-        """get input and labels for training from iterator
+        """Takes in a batch of data and returns the input features (clicked_title_batch and candidate_title_batch) and labels.
 
         Args:
             batch data: input batch data from iterator
@@ -46,11 +46,13 @@ class NRMSModel_Capstone(BaseModel):
             torch.tensor(batch_data["clicked_title_batch"], dtype=torch.long),
             torch.tensor(batch_data["candidate_title_batch"], dtype=torch.long),
         ]
+        
         input_label = torch.tensor(batch_data["labels"], dtype=torch.float32)
         return input_feat, input_label
 
     def _get_user_feature_from_iter(self, batch_data):
-        """get input of user encoder
+        """Takes in a batch of data and returns the input user feature (clicked title batch).
+            This is the input of the user encoder
         Args:
             batch_data: input batch data from user iterator
 
@@ -60,7 +62,8 @@ class NRMSModel_Capstone(BaseModel):
         return torch.tensor(batch_data["clicked_title_batch"], dtype=torch.long)
 
     def _get_news_feature_from_iter(self, batch_data):
-        """get input of news encoder
+        """Takes in a batch of data and returns the input news feature (candidate title batch).
+        This is the input of the news encoder
         Args:
             batch_data: input batch data from news iterator
 
@@ -134,16 +137,42 @@ class NRMSModel_Capstone(BaseModel):
         hparams = self.hparams
 
         # input layer
+        # clicked_title is a 3D tensor that represents the clicked titles of a user
+        # clicked_title has shape (hparams.his_size, hparams.title_size).
+        # his_size is the number of news articles that each user has clicked in the past, and title_size is the number of words in each news article title.
         clicked_title = nn.Input(
             shape=(hparams.his_size, hparams.title_size), dtype=torch.long
         )
-        candidate_title = nn.Input(
-            shape=(hparams.title_size,), dtype=torch.long
+
+        # number of negative samples that will be generated for each positive sample during training
+        # total number of titles that will be fed into the model for each training example
+        pred_input_title = nn.Input(
+            shape=(hparams.npratio + 1, hparams.title_size), dtype=torch.long
         )
 
-        # embedding layer
+        #This input layer is used for making predictions on a single title.
+        pred_input_title_one = nn.Input(
+            shape=(
+                1,
+                hparams.title_size,
+            ),
+            dtype=torch.long,
+        )
+
+        #change the shape of the tensor from (1, hparams.title_size) to (hparams.title_size,),
+        #which is the required input shape for the model's output layer.
+        candidate_title = nn.Reshape((hparams.title_size,))(
+            pred_input_title_one
+        )
+
+        # The Embedding layer maps each word in the input text to a vector representation. 
+        # self.word2vec_embedding array is a pre-trained word embedding matrix that is used to initialize the weights of this layer.
+        # hparams.word_emb_dim specifies the dimensionality of the embedding space
         embedding_layer = nn.Embedding(
-            hparams.doc_size, hparams.word_emb_dim, weights=[self.word2vec_embedding], trainable=True
+            self.word2vec_embedding.shape[0],
+            hparams.word_emb_dim,
+            weights=[self.word2vec_embedding],
+            trainable=True,
         )
 
         # news encoder
@@ -152,20 +181,20 @@ class NRMSModel_Capstone(BaseModel):
         userencoder = self._build_userencoder(newsencoder)
 
         # get user representation
-        user_present = userencoder(clicked_title)
+        user_representation = userencoder(clicked_title)
 
         # get news representation
-        news_present = newsencoder(candidate_title)
+        news_representation = newsencoder(candidate_title)
 
         # A^T * H
         att_layer = AttLayer2(hparams.attention_hidden_dim, seed=self.seed)
-        att_score = att_layer([news_present, user_present])
+        att_score = att_layer([news_ representation, user_ representation])
         # mask
         mask = nn.Lambda(lambda x: -1e30 * (1 - x))(candidate_title)
         att_score = nn.Add()([att_score, mask])
         # news representation after attention
         news_repr = nn.Lambda(lambda x: nn.softmax(x))(att_score)
-        news_output = nn.Dot(axes=1)([news_repr, news_present])
+        news_output = nn.Dot(axes=1)([news_repr, news_ representation])
 
         # multi-task
         click_pred = nn.Dense(1, activation="sigmoid", use_bias=False)(news_output)
